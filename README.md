@@ -58,4 +58,3 @@ Contributions are welcome! If you'd like to contribute to this project, please f
 - Email: [contact.spyflow@spyflow.net](mailto:contact.spyflow@spyflow.net)
 
 Thank you for using the MusicBot! Enjoy listening to music in your Discord server!
-```
