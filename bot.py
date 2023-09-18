@@ -11,7 +11,7 @@ import string
 # Code made by: spyflow
 # Discord: spyflow
 # GitHub: https://github.com/spyflow
-# Contact: spyflow@spyflow.net
+# Contact: contact.spyflow@spyflow.net
 
 intents = discord.Intents.default()
 intents.typing = False
@@ -23,7 +23,7 @@ queue = []  # Playlist
 sname = []  # List of song names
 current_song = None  # Currently playing song
 inactive_timer = None  # Inactivity timer
-uf = "none"
+uf = "idle"
 channel = None
 
 # Configure the logger
@@ -39,14 +39,10 @@ async def on_ready():
 
 @tasks.loop(seconds=15)
 async def update_presence():
-    try:
-        nmd = uf
-    except:
-        nmd = "none"
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,  # Change the type to 'listening'
-            name=nmd
+            name=uf
         )
     )
 
@@ -119,6 +115,7 @@ async def leave(ctx):
         if inactive_timer:
             inactive_timer.cancel()
         logger.info('Disconnected due to command')
+        await ctx.send('Disconnected')
 
 @bot.command()
 async def ping(ctx):
@@ -151,7 +148,6 @@ def play_next_song(voice_channel, ctx):
     global uf # Declare as a global variable
 
     if queue:
-        uf = True # Bot is playing a song 
         file_path = queue.pop(0) # Get the first file in the queue
         uf = sname[0]
         song_name = sname.pop(0) # Get the first song name in the queue
@@ -166,7 +162,7 @@ def play_next_song(voice_channel, ctx):
         inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_channel, ctx) # Pass ctx as a parameter
     else:
         current_song = None # Reset the current song
-        uf = "none"
+        uf = "idle"
         channel = None
 
 def song_finished(file_path, ctx):  # Add ctx as a parameter
