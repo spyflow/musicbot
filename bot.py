@@ -62,11 +62,8 @@ async def play(ctx, url):
     global channel
 
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-    if channel is None:
-        channel = voice_channel
-    
-    if voice_channel != channel:
-        await ctx.send('I am already connected to a voice channel.')
+    if voice_channel is not None and voice_channel.channel != ctx.author.voice.channel:
+        await ctx.send('I am already connected to a different voice channel.')
         return
 
     if not (voice_channel and voice_channel.is_connected()):
@@ -164,6 +161,7 @@ def play_next_song(voice_channel, ctx):
     else:
         current_song = None # Reset the current song
         uf = "none"
+        channel = None
 
 def song_finished(file_path, ctx):  # Add ctx as a parameter
     cleanup(file_path)
