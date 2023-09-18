@@ -21,12 +21,16 @@ git clone https://github.com/spyflow/musicbot.git
 ```bash
 pip install discord.py pytube
 ```
+3. Install ffmpeg
+```bash
+sudo apt install ffmpeg
+```   
 
-3. [Create a Discord bot](https://discordpy.readthedocs.io/en/stable/discord.html) and obtain its token.
+4. [Create a Discord bot](https://discordpy.readthedocs.io/en/stable/discord.html) and obtain its token.
 
-4. Replace `'YOUR_BOT_TOKEN'` in the last line of the code with your bot's token.
+5. Replace `'YOUR_BOT_TOKEN'` in the last line of the code with your bot's token.
 
-5. Run the bot:
+6. Run the bot:
 
 ```bash
 python your_bot_script.py
