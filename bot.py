@@ -13,9 +13,6 @@ import string
 # GitHub: https://github.com/spyflow
 # Contact: spyflow@spyflow.net
 
-def nothing():
-    pass
-
 intents = discord.Intents.default()
 intents.typing = False
 intents.presences = True
