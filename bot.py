@@ -113,6 +113,12 @@ async def leave(ctx):
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
     if voice_channel.is_connected():
         await voice_channel.disconnect()
+        queue.clear()
+        sname.clear()
+        current_song = None
+        if inactive_timer:
+            inactive_timer.cancel()
+        logger.info('Disconnected due to command')
 
 @bot.command()
 async def ping(ctx):
