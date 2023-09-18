@@ -23,8 +23,7 @@ queue = []  # Playlist
 sname = []  # List of song names
 current_song = None  # Currently playing song
 inactive_timer = None  # Inactivity timer
-uf = "idle"
-channel = None
+ufo = "idle"
 
 # Configure the logger
 logger = logging.getLogger('discord')
@@ -42,7 +41,7 @@ async def update_presence():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,  # Change the type to 'listening'
-            name=uf
+            name=ufo
         )
     )
 
@@ -149,7 +148,7 @@ def play_next_song(voice_channel, ctx):
 
     if queue:
         file_path = queue.pop(0) # Get the first file in the queue
-        uf = sname[0]
+        ufo = sname[0]
         song_name = sname.pop(0) # Get the first song name in the queue
         current_song = file_path # Set the current song
 
@@ -162,8 +161,7 @@ def play_next_song(voice_channel, ctx):
         inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_channel, ctx) # Pass ctx as a parameter
     else:
         current_song = None # Reset the current song
-        uf = "idle"
-        channel = None
+        ufo = "idle"
 
 def song_finished(file_path, ctx):  # Add ctx as a parameter
     cleanup(file_path)
