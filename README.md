@@ -33,7 +33,7 @@ sudo apt install ffmpeg
 6. Run the bot:
 
 ```bash
-python your_bot_script.py
+python bot.py
 ```
 
 ## Usage
