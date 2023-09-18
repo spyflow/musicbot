@@ -25,24 +25,13 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 queue = []  # Playlist
 sname = []  # List of song names
 current_song = None  # Currently playing song
-lcurr = None
-llast = None
 inactive_timer = None  # Inactivity timer
+uf = False
 
 # Configure the logger
 logger = logging.getLogger('discord')
 logger.setLevel(logging.INFO)
-
-static_text_1 = ''
-static_text = ""
-
-# Configure the handler to display logs in the console
-class CustomFormatter(logging.Formatter):
-    def format(self, record):
-        return static_text_1 + static_text
-
 handler = logging.StreamHandler()
-handler.setFormatter(CustomFormatter())
 logger.addHandler(handler)
 
 @bot.event
@@ -50,20 +39,13 @@ async def on_ready():
     logger.info(f'Connected as {bot.user.name}')
     await update_presence.start()
 
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=15)
 async def update_presence():
-    global llast
-    if lcurr is None:
-        psong_name = "none"
-    else:
-        psong_name = lcurr
-    if llast != lcurr:
-        logger.info(f'RPC updated to "{psong_name}"')
-        llast = lcurr
+    nmd = sname(0)
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,  # Change the type to 'listening'
-            name=psong_name
+            name=nmd
         )
     )
 
@@ -79,8 +61,10 @@ async def play(ctx, url):
 
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
 
-    if voice_channel and voice_channel.is_connected():
-        nothing()
+    if voice_channel and voice_channel.is_connected() and uf:
+        logger.warning('Bot is already connected to a voice channel.')
+        await ctx.send('Bot is already connected to a voice channel.')
+        return
     else:
         channel = ctx.message.author.voice.channel
         voice_channel = await channel.connect()
@@ -154,29 +138,27 @@ def cleanup(file_path):
     os.remove(file_path)
     logger.info(f'File deleted: {file_path}')
 
-def play_next_song(voice_channel, ctx):  # Add ctx as a parameter
+def play_next_song(voice_channel, ctx):
     global current_song  # Declare as a global variable
     global inactive_timer  # Declare as a global variable
-    global lcurr
-    global llast
+    global uf # Declare as a global variable
 
     if queue:
-        file_path = queue.pop(0)
-        song_name = sname.pop(0)
-        current_song = file_path
+        uf = True # Bot is playing a song 
+        file_path = queue.pop(0) # Get the first file in the queue
+        song_name = sname.pop(0) # Get the first song name in the queue
+        current_song = file_path # Set the current song
 
         voice_channel.play(discord.FFmpegPCMAudio(file_path), after=lambda e: song_finished(file_path, ctx))  # Pass ctx as a parameter
-        llast = lcurr
-        lcurr = song_name
-        logger.info(f'Playing song: {file_path}: {song_name}')
-        asyncio.run_coroutine_threadsafe(ctx.send(f'Playing song: {song_name}'), bot.loop)
+        logger.info(f'Playing song: {file_path}: {song_name}') # Log the song's name
+        asyncio.run_coroutine_threadsafe(ctx.send(f'Playing song: {song_name}'), bot.loop) # Send a message that the song is playing
         # Reset the inactivity timer
         if inactive_timer:
-            inactive_timer.cancel()
-        inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_channel, ctx)
+            inactive_timer.cancel() # Cancel the timer
+        inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_channel, ctx) # Pass ctx as a parameter
     else:
-        current_song = None
-        lcurr = None
+        current_song = None # Reset the current song
+        uf = False
 
 def song_finished(file_path, ctx):  # Add ctx as a parameter
     cleanup(file_path)
