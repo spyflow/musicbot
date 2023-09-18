@@ -57,7 +57,7 @@ Contributions are welcome! If you'd like to contribute to this project, please f
 ## Contact
 
 - Author: SpyFLow
-- Discord: spyflow
+- Discord: [Discord](https://discord.com/users/533093302031876096)
 - GitHub: [https://github.com/spyflow](https://github.com/spyflow)
 - Email: [contact.spyflow@spyflow.net](mailto:contact.spyflow@spyflow.net)
 
