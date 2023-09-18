@@ -144,7 +144,7 @@ def cleanup(file_path):
 def play_next_song(voice_channel, ctx):
     global current_song  # Declare as a global variable
     global inactive_timer  # Declare as a global variable
-    global uf # Declare as a global variable
+    global ufo # Declare as a global variable
 
     if queue:
         file_path = queue.pop(0) # Get the first file in the queue
