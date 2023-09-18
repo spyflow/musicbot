@@ -23,7 +23,8 @@ queue = []  # Playlist
 sname = []  # List of song names
 current_song = None  # Currently playing song
 inactive_timer = None  # Inactivity timer
-uf = False
+uf = "none"
+channel = None
 
 # Configure the logger
 logger = logging.getLogger('discord')
@@ -38,7 +39,10 @@ async def on_ready():
 
 @tasks.loop(seconds=15)
 async def update_presence():
-    nmd = sname(0)
+    try:
+        nmd = uf
+    except:
+        nmd = "none"
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,  # Change the type to 'listening'
@@ -55,14 +59,17 @@ async def on_command(ctx):
 @bot.command()
 async def play(ctx, url):
     global current_song  # Declare as a global variable
+    global channel
 
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-
-    if voice_channel and voice_channel.is_connected() and uf:
-        logger.warning('Bot is already connected to a voice channel.')
-        await ctx.send('Bot is already connected to a voice channel.')
+    if channel is None:
+        channel = voice_channel
+    
+    if voice_channel != channel:
+        await ctx.send('I am already connected to a voice channel.')
         return
-    else:
+
+    if not (voice_channel and voice_channel.is_connected()):
         channel = ctx.message.author.voice.channel
         voice_channel = await channel.connect()
         logger.info(f'Bot joined voice channel: {channel.name}')
@@ -143,6 +150,7 @@ def play_next_song(voice_channel, ctx):
     if queue:
         uf = True # Bot is playing a song 
         file_path = queue.pop(0) # Get the first file in the queue
+        uf = sname[0]
         song_name = sname.pop(0) # Get the first song name in the queue
         current_song = file_path # Set the current song
 
@@ -155,7 +163,7 @@ def play_next_song(voice_channel, ctx):
         inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_channel, ctx) # Pass ctx as a parameter
     else:
         current_song = None # Reset the current song
-        uf = False
+        uf = "none"
 
 def song_finished(file_path, ctx):  # Add ctx as a parameter
     cleanup(file_path)
