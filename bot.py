@@ -7,6 +7,7 @@ import sys
 import asyncio
 import random
 import string
+import requests
 
 # Code made by: spyflow
 # Discord: spyflow
@@ -31,6 +32,38 @@ logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 logger.addHandler(handler)
 
+
+# Search for a video on YouTube
+def searchinyt(prompt):
+    # Parámetros de búsqueda
+    api_key = 'YOUR_YOUTUBE_V3_API_KEY'
+    params = {
+        'q': prompt,
+        'part': 'snippet',
+        'type': 'video',
+        'key': api_key,
+    }
+
+    # URL de la API de YouTube
+    url = 'https://www.googleapis.com/youtube/v3/search'
+
+    # Realiza la solicitud a la API de YouTube
+    response = requests.get(url, params=params)
+
+    # Comprueba si la solicitud fue exitosa
+    if response.status_code == 200:
+        data = response.json()
+
+        # Verifica si hay resultados
+        if 'items' in data and len(data['items']) > 0:
+            # Obtén el enlace del primer resultado
+            first_video_id = data['items'][0]['id']['videoId']
+            video_link = f'https://www.youtube.com/watch?v={first_video_id}'
+            return video_link
+
+    return None
+
+
 @bot.event
 async def on_ready():
     logger.info(f'Connected as {bot.user.name}')
@@ -52,7 +85,7 @@ async def on_command(ctx):
     logger.info(f'Command "{command.name}" used by {author.name}#{author.discriminator}')
 
 @bot.command()
-async def play(ctx, url):
+async def play(ctx, *args):
     global current_song  # Declare as a global variable
     global channel
 
@@ -65,6 +98,16 @@ async def play(ctx, url):
         channel = ctx.message.author.voice.channel
         voice_channel = await channel.connect()
         logger.info(f'Bot joined voice channel: {channel.name}')
+
+    # Join all the words provided in the input into a single search query
+    search_query = ' '.join(args)
+
+    # Check if the input looks like a URL
+    if search_query.startswith('http'):
+        url = search_query
+    else:
+        # If not a URL, use searchinyt to search for the video
+        url = searchinyt(search_query)
 
     try:
         youtube = YouTube(url)
