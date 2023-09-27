@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from pytube import YouTube
+import yt_dlp
 import os
 import logging
 import sys
@@ -25,6 +25,19 @@ sname = []  # List of song names
 current_song = None  # Currently playing song
 inactive_timer = None  # Inactivity timer
 ufo = "idle"
+
+# Initialize the yt-dlp downloader
+ydl_opts = {
+    'format': 'bestaudio/best',
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'mp3',
+        'preferredquality': '192',
+    }],
+    'outtmpl': 'music/%(id)s',  # Nombre de archivo de salida
+}
+
+ydl = yt_dlp.YoutubeDL(ydl_opts)
 
 # Configure the logger
 logger = logging.getLogger('discord')
@@ -86,7 +99,7 @@ async def on_command(ctx):
 
 @bot.command()
 async def play(ctx, *args):
-    global current_song  # Declare as a global variable
+    global current_song  # Declared as a global variable
     global channel
 
     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
@@ -102,26 +115,25 @@ async def play(ctx, *args):
     # Join all the words provided in the input into a single search query
     search_query = ' '.join(args)
 
-    # Check if the input looks like a URL
-    if search_query.startswith('http'):
-        url = search_query
-    else:
-        # If not a URL, use searchinyt to search for the video
-        url = searchinyt(search_query)
-
     try:
-        youtube = YouTube(url)
+        # Check if the input looks like a URL
+        if search_query.startswith('http'):
+            url = search_query
+        else:
+            # If not a URL, use searchinyt to search for the video
+            url = searchinyt(search_query)
+
+        ydl = yt_dlp.YoutubeDL(ydl_opts)
+        info_dict = ydl.extract_info(url, download=True)
+
         # Create a random 5-letter text called atext
-        atext = ""
-        for i in range(5):
-            atext += random.choice(string.ascii_letters)
+        atext = "".join(random.choice(string.ascii_letters) for _ in range(5))
 
-        audio_stream = youtube.streams.filter(only_audio=True).first()
-        file_path = f'music/{youtube.video_id}{atext}.mp3'  # Unique name based on the video ID + something
+        # renames the file to id+atext.mp3
+        os.rename(f'music/{info_dict["id"]}.mp3', f'music/{info_dict["id"]}{atext}.mp3')
 
-        audio_stream.download(output_path='music', filename=f"{youtube.video_id}{atext}.mp3")
-
-        song_name = youtube.title  # Get the song's name
+        song_name = info_dict['title']  # Get the song's name
+        file_path = f'music/{info_dict["id"]}{atext}.mp3'  # Get the file path
 
         queue.append(file_path)
         sname.append(song_name)
@@ -134,7 +146,6 @@ async def play(ctx, *args):
         # If there is a song playing, send a message that it has been added to the queue
         if len(queue) >= 1:
             await ctx.send(f'Added to queue: {song_name}')
-
     except Exception as e:
         logger.warning(f'Error playing the song: {str(e)}')
 
@@ -181,7 +192,7 @@ async def autor(ctx):
     await ctx.send('Author: <@!533093302031876096>')
 
 def cleanup(file_path):
-    os.remove(file_path)
+    #os.remove(file_path)
     logger.info(f'File deleted: {file_path}')
 
 def play_next_song(voice_channel, ctx):
