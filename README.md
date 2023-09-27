@@ -19,7 +19,7 @@ git clone https://github.com/spyflow/musicbot.git
 2. Install the required dependencies:
 
 ```bash
-pip install discord.py pytube
+pip install discord.py yt-dlp pynacl
 ```
 3. Install ffmpeg
 ```bash
