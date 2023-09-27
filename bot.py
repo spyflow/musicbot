@@ -192,7 +192,7 @@ async def autor(ctx):
     await ctx.send('Author: <@!533093302031876096>')
 
 def cleanup(file_path):
-    #os.remove(file_path)
+    os.remove(file_path)
     logger.info(f'File deleted: {file_path}')
 
 def play_next_song(voice_channel, ctx):
