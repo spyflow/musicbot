@@ -34,7 +34,7 @@ ydl_opts = {
         'preferredcodec': 'mp3',
         'preferredquality': '192',
     }],
-    'outtmpl': 'music/%(id)s',  # Nombre de archivo de salida
+    'outtmpl': 'music/%(id)s',
 }
 
 ydl = yt_dlp.YoutubeDL(ydl_opts)
