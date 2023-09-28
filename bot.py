@@ -48,7 +48,7 @@ logger.addHandler(handler)
 
 # Search for a video on YouTube
 def searchinyt(prompt):
-    # Parámetros de búsqueda
+    # Parameters
     api_key = 'YOUR_YOUTUBE_V3_API_KEY'
     params = {
         'q': prompt,
@@ -57,19 +57,19 @@ def searchinyt(prompt):
         'key': api_key,
     }
 
-    # URL de la API de YouTube
+    # URL API YouTube
     url = 'https://www.googleapis.com/youtube/v3/search'
 
-    # Realiza la solicitud a la API de YouTube
+    # Make the request to the YouTube API
     response = requests.get(url, params=params)
 
-    # Comprueba si la solicitud fue exitosa
+    # Check if the request was successful
     if response.status_code == 200:
         data = response.json()
 
-        # Verifica si hay resultados
+        # Check if there are results
         if 'items' in data and len(data['items']) > 0:
-            # Obtén el enlace del primer resultado
+            # Get the link of the first result
             first_video_id = data['items'][0]['id']['videoId']
             video_link = f'https://www.youtube.com/watch?v={first_video_id}'
             return video_link
