@@ -2,9 +2,8 @@
 
 This is a simple Discord bot for playing music from YouTube videos in a voice channel. The bot is written in Python and uses the Discord API and pytube library to fetch and play music.
 
-## Discontinuation
-
-**Attention:** This project has been discontinued and will no longer receive updates.
+> [!WARNING]  
+> This project has been discontinued and will no longer receive updates.
 
 ## Features
 
