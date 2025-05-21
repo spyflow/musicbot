@@ -22,18 +22,35 @@ git clone https://github.com/spyflow/musicbot.git
 2. Install the required dependencies:
 
 ```bash
-pip install discord.py yt-dlp pynacl
+pip install discord.py yt-dlp pynacl python-dotenv
 ```
 3. Install ffmpeg
 ```bash
 sudo apt install ffmpeg
-```   
+```
+
+## Environment Variables
+
+This bot requires certain API keys and tokens to be configured as environment variables.
+
+1.  **Create a `.env` file** in the root directory of the project.
+2.  **Add the following lines** to the `.env` file, replacing `your_youtube_api_key_here` and `your_discord_bot_token_here` with your actual credentials:
+
+    ```env
+    YOUTUBE_API_KEY=your_youtube_api_key_here
+    DISCORD_BOT_TOKEN=your_discord_bot_token_here
+    ```
+
+3.  **Install `python-dotenv`:**
+    If you are using a virtual environment, make sure to install `python-dotenv` which is used to load these variables from the `.env` file:
+    ```bash
+    pip install python-dotenv
+    ```
+    You will also need to add `import dotenv` and `dotenv.load_dotenv()` at the beginning of `bot.py`.
 
 4. [Create a Discord bot](https://discordpy.readthedocs.io/en/stable/discord.html) and obtain its token.
 
-5. Replace `'YOUR_BOT_TOKEN'` in the last line of the code with your bot's token.
-
-6. Run the bot:
+5. Run the bot:
 
 ```bash
 python bot.py
