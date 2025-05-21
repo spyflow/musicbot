@@ -24,13 +24,42 @@ intents.message_content = True  # Enable message content access (required for co
 inactive_time = 300  # Time in seconds before the bot disconnects due to inactivity
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- Global State Variables ---
-# These variables manage the bot's state regarding music playback and activity.
-queue = []  # A list of file paths for songs waiting to be played.
-song_titles = []  # A list of human-readable song titles, corresponding to the 'queue'.
-current_song = None  # Stores the file path of the song currently being played. None if no song is active.
-inactive_timer = None  # Holds the asyncio.TimerHandle for the inactivity disconnect timer.
-current_activity_name = "idle"  # String displayed as the bot's activity (e.g., "Listening to [song name]").
+# --- Guild Player State Management ---
+class GuildPlayerState:
+    """Encapsulates all playback-related state for a single guild."""
+    def __init__(self, guild_id: int, bot_instance: commands.Bot):
+        self.guild_id: int = guild_id
+        self.bot: commands.Bot = bot_instance # Used for scheduling tasks like timers
+        self.queue: list[str] = []  # List of file paths for songs
+        self.song_titles: list[str] = []  # List of song titles corresponding to the queue
+        self.current_song_path: str | None = None  # File path of the currently playing song
+        self.current_song_title: str | None = None # Title of the currently playing song
+        self.inactive_timer: asyncio.TimerHandle | None = None  # Timer for inactivity disconnect
+        self.voice_client: discord.VoiceClient | None = None  # The voice client for this guild
+        self.last_ctx: commands.Context | None = None  # Last command context for sending messages
+
+    def __repr__(self):
+        return (f"<GuildPlayerState guild_id={self.guild_id} "
+                f"queue_len={len(self.queue)} "
+                f"vc_connected={'Yes' if self.voice_client and self.voice_client.is_connected() else 'No'}>")
+
+guild_states: dict[int, GuildPlayerState] = {}
+
+def get_or_create_guild_state(ctx: commands.Context) -> GuildPlayerState:
+    """
+    Retrieves or creates the GuildPlayerState for the guild associated with the context.
+    Updates last_ctx for existing states.
+    """
+    guild_id = ctx.guild.id
+    if guild_id not in guild_states:
+        logger.info(f"Creating new GuildPlayerState for guild ID: {guild_id} ({ctx.guild.name})")
+        guild_states[guild_id] = GuildPlayerState(guild_id=guild_id, bot_instance=bot)
+    
+    # Always update last_ctx to ensure messages are sent to the most recent relevant channel.
+    # Also ensures the bot instance is current if it were to change (though it doesn't in this app's lifecycle).
+    guild_states[guild_id].last_ctx = ctx
+    guild_states[guild_id].bot = bot # Ensure bot instance is up-to-date (mostly for completeness)
+    return guild_states[guild_id]
 
 # --- YouTube Downloader Configuration ---
 # Options for the yt-dlp library, which handles downloading audio from YouTube.
@@ -150,12 +179,15 @@ async def update_presence():
     """
     activity_type = discord.ActivityType.listening
     # Ensures current_activity_name is not excessively long for presence.
-    activity_name = current_activity_name[:128] if current_activity_name else "nothing"
+    # activity_name = current_activity_name[:128] if current_activity_name else "nothing"
+    # New generic presence:
+    activity = discord.Activity(type=discord.ActivityType.listening, name="music via !play")
+    # Alternative dynamic presence:
+    # activity = discord.Activity(type=discord.ActivityType.playing, name=f"music on {len(bot.guilds)} servers")
 
-    activity = discord.Activity(type=activity_type, name=activity_name)
     try:
         await bot.change_presence(activity=activity)
-        logger.debug(f"Presence updated to: Listening to {activity_name}")
+        logger.debug(f"Presence updated to: {activity.name}")
     except Exception as e: # Catch potential errors during presence update
         logger.warning(f"Could not update presence: {e}")
 
@@ -188,7 +220,7 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
         ctx (commands.Context): The context of the command.
         search_query (str): The song name or YouTube URL provided by the user.
     """
-    global current_song  # Manages the currently playing song's file path.
+    guild_state = get_or_create_guild_state(ctx)
     # 'channel' for voice connection is managed by voice_client from ctx or new connection.
 
     if not search_query:
@@ -201,24 +233,29 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
         return
 
     user_voice_channel = ctx.author.voice.channel
-    voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-
-    # If bot is in a voice channel but it's different from the user's, inform the user.
-    if voice_client and voice_client.channel != user_voice_channel:
-        await ctx.send(f"I am already in a different voice channel: '{voice_client.channel.name}'.")
+    # Use guild_state.voice_client
+    if guild_state.voice_client and guild_state.voice_client.channel != user_voice_channel:
+        await ctx.send(f"I am already in a different voice channel: '{guild_state.voice_client.channel.name}'.")
         return
 
     # Connect to the user's voice channel if not already connected.
-    if not voice_client:
+    if not guild_state.voice_client or not guild_state.voice_client.is_connected():
         try:
-            voice_client = await user_voice_channel.connect()
+            # Disconnect if connected to a different channel or in a broken state
+            if guild_state.voice_client:
+                logger.info(f"Found existing voice client for guild {ctx.guild.id}, ensuring it's disconnected before reconnecting.")
+                await guild_state.voice_client.disconnect(force=True)
+                guild_state.voice_client = None
+
+            guild_state.voice_client = await user_voice_channel.connect()
             logger.info(f"Bot joined voice channel: '{user_voice_channel.name}' in guild '{ctx.guild.name}'.")
         except discord.ClientException as e:
             logger.error(f"Error connecting to voice channel '{user_voice_channel.name}': {e}")
+            guild_state.voice_client = None # Ensure it's None on failure
             await ctx.send(f"Could not join your voice channel. Error: {e}")
             return
     else: # Bot is already in the correct voice channel
-        logger.info(f"Bot is already in voice channel: '{voice_client.channel.name}'.")
+        logger.info(f"Bot is already in voice channel: '{guild_state.voice_client.channel.name}'.")
 
 
     # Determine if the input is a URL or a search query.
@@ -252,14 +289,14 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
         logger.info(f"Download complete for '{song_title}'. File saved to: {file_path}")
 
         # Add the downloaded song to the queue.
-        queue.append(file_path)
-        song_titles.append(song_title)
+        guild_state.queue.append(file_path)
+        guild_state.song_titles.append(song_title)
         await ctx.send(f"Added to queue: '{song_title}'")
 
         # If no song is currently playing and the bot is connected, start playback.
-        if not current_song and voice_client and voice_client.is_connected():
-            play_next_song(voice_client, ctx)
-        elif not voice_client or not voice_client.is_connected():
+        if not guild_state.current_song_path and guild_state.voice_client and guild_state.voice_client.is_connected():
+            play_next_song(guild_state) # Pass guild_state
+        elif not guild_state.voice_client or not guild_state.voice_client.is_connected():
             logger.warning("Download complete but voice client is not connected. Cannot start playback.")
             await ctx.send("I'm not connected to a voice channel anymore. Please use !leave and !play again.")
 
@@ -281,17 +318,17 @@ async def skip(ctx: commands.Context):
     It stops the current playback, which then triggers the 'after' callback
     (song_finished) in `voice_client.play` to play the next song or handle queue end.
     """
-    voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    guild_state = get_or_create_guild_state(ctx)
+    voice_client = guild_state.voice_client # Use voice_client from guild_state
 
     if voice_client and voice_client.is_playing():
-        logger.info(f"Skip command invoked by {ctx.author.name}. Stopping current song.")
+        logger.info(f"Skip command invoked by {ctx.author.name} for guild {ctx.guild.id}. Stopping current song.")
         voice_client.stop()  # Stopping playback triggers song_finished.
         await ctx.send('Song skipped.')
-    elif voice_client and not voice_client.is_playing() and current_song:
+    elif voice_client and not voice_client.is_playing() and guild_state.current_song_path:
         # This case handles if playback somehow stopped but state wasn't cleared.
-        # Forcing play_next_song can help recover the queue.
-        logger.info(f"Skip command: Nothing actively playing, but a song ('{current_song}') was marked as current. Attempting to advance queue.")
-        play_next_song(voice_client, ctx) # This will clear current_song if queue is empty or play next.
+        logger.info(f"Skip command for guild {ctx.guild.id}: Nothing actively playing, but a song ('{guild_state.current_song_path}') was marked as current. Attempting to advance queue.")
+        play_next_song(guild_state) # This will clear current_song_path if queue is empty or play next.
         await ctx.send('Trying to play the next song as current one was stuck...')
     else:
         await ctx.send('No song is currently playing to skip.')
@@ -300,46 +337,52 @@ async def skip(ctx: commands.Context):
 @bot.command(name='leave', help='Makes the bot leave the voice channel and clears the song queue.')
 async def leave(ctx: commands.Context):
     """
-    Command for the bot to leave the voice channel.
-    It also clears the song queue and resets related playback state variables.
+    Command for the bot to leave the voice channel for this guild.
+    It also clears the song queue and resets related playback state for the guild.
     """
-    voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    guild_state = get_or_create_guild_state(ctx)
+    voice_client = guild_state.voice_client
 
     if voice_client and voice_client.is_connected():
         logger.info(f"Bot leaving voice channel '{voice_client.channel.name}' in guild '{ctx.guild.name}' due to 'leave' command by {ctx.author.name}.")
         await voice_client.disconnect()
+        guild_state.voice_client = None # Important to nullify after disconnect
 
-        # Clear queue and reset global playback state.
-        queue.clear()
-        song_titles.clear()
-        global current_song, inactive_timer, current_activity_name
-        current_song = None
-        current_activity_name = "idle" # Reset activity name.
-        if inactive_timer:
-            inactive_timer.cancel()
-            inactive_timer = None
-            logger.info("Inactivity timer cancelled due to 'leave' command.")
-        await ctx.send('Disconnected from voice channel and cleared the song queue.')
+        # Clear queue and reset guild-specific playback state.
+        guild_state.queue.clear()
+        guild_state.song_titles.clear()
+        guild_state.current_song_path = None
+        guild_state.current_song_title = None # Reset activity name for this guild's context
+        if guild_state.inactive_timer:
+            guild_state.inactive_timer.cancel()
+            guild_state.inactive_timer = None
+            logger.info(f"Inactivity timer for guild {ctx.guild.id} cancelled due to 'leave' command.")
+        await ctx.send('Disconnected from voice channel and cleared the song queue for this server.')
+        # Optionally, remove the state from the global dictionary:
+        # if ctx.guild.id in guild_states:
+        #     del guild_states[ctx.guild.id]
+        #     logger.info(f"GuildPlayerState for guild {ctx.guild.id} removed from global states.")
     else:
-        await ctx.send('I am not currently in a voice channel.')
+        await ctx.send('I am not currently in a voice channel on this server.')
 
 
 @bot.command(name='ping', help="Checks the bot's voice connection latency.")
 async def ping(ctx: commands.Context):
     """
-    Command to check the bot's latency to the Discord voice server.
+    Command to check the bot's latency to the Discord voice server for this guild.
     Provides the round-trip voice latency in milliseconds.
     """
-    voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    guild_state = get_or_create_guild_state(ctx)
+    voice_client = guild_state.voice_client
 
     if voice_client and voice_client.is_connected():
         latency_ms = voice_client.latency * 1000  # Latency is given in seconds by discord.py.
         logger.info(f"Ping command: Voice latency for guild '{ctx.guild.name}' is {latency_ms:.2f} ms.")
-        await ctx.send(f'Voice connection latency: {latency_ms:.2f} ms')
+        await ctx.send(f'Voice connection latency for this server: {latency_ms:.2f} ms')
         if latency_ms > 150:  # Arbitrary threshold for "high" latency.
             await ctx.send('Note: The voice latency is a bit high, which might affect audio quality.')
     else:
-        await ctx.send('I am not connected to a voice channel. Voice latency cannot be measured.')
+        await ctx.send('I am not connected to a voice channel on this server. Voice latency cannot be measured.')
 
 
 @bot.command(name='author', help='Shows information about the bot author.')
@@ -381,33 +424,37 @@ def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
     It manages the global state for `current_song`, `current_activity_name`, and `inactive_timer`.
 
     Args:
-        voice_client (discord.VoiceClient): The voice client instance for the guild.
-        ctx (commands.Context): The context of the command that initiated playback or
-                                from which subsequent songs are played. Used for sending messages
-                                and for retrieving guild information.
+        guild_state (GuildPlayerState): The playback state object for the specific guild.
     """
-    global current_song, inactive_timer, current_activity_name
+    # Removed global variable access, now uses guild_state attributes.
+    voice_client = guild_state.voice_client # Get voice_client from guild_state
+    ctx = guild_state.last_ctx # Use the last known context for this guild
 
     if not voice_client or not voice_client.is_connected():
-        logger.warning("play_next_song called but voice_client is not valid or not connected. Clearing queue.")
-        queue.clear()
-        song_titles.clear()
-        current_song = None
-        current_activity_name = "idle"
-        if inactive_timer:
-            inactive_timer.cancel()
-            inactive_timer = None
+        logger.warning(f"play_next_song (guild {guild_state.guild_id}): voice_client is not valid or not connected. Clearing queue.")
+        guild_state.queue.clear()
+        guild_state.song_titles.clear()
+        guild_state.current_song_path = None
+        guild_state.current_song_title = None
+        if guild_state.inactive_timer:
+            guild_state.inactive_timer.cancel()
+            guild_state.inactive_timer = None
+        return
+    
+    if not ctx:
+        logger.error(f"play_next_song (guild {guild_state.guild_id}): last_ctx is None. Cannot send messages. Aborting playback for this guild.")
+        # Potentially clear queue or attempt recovery, but for now, log and exit for this guild.
+        # This situation might occur if the bot starts up and a timer fires before any command is run in a guild.
         return
 
-    if queue:  # If there are songs in the queue
-        file_path = queue.pop(0)  # Get the first file path from the queue.
-        # Pop corresponding song title, default to "Unknown Title" if lists are somehow mismatched.
-        song_title = song_titles.pop(0) if song_titles else "Unknown Title"
+    if guild_state.queue:  # If there are songs in the guild's queue
+        file_path = guild_state.queue.pop(0)
+        song_title = guild_state.song_titles.pop(0) if guild_state.song_titles else "Unknown Title"
 
-        current_song = file_path  # Mark this song as currently playing.
-        current_activity_name = song_title  # Update bot's presence.
+        guild_state.current_song_path = file_path
+        guild_state.current_song_title = song_title
 
-        logger.info(f"Attempting to play: '{song_title}' from {file_path} in guild '{ctx.guild.name}'.")
+        logger.info(f"Attempting to play (guild {guild_state.guild_id}): '{song_title}' from {file_path} in guild '{ctx.guild.name}'.")
 
         try:
             # Crucial check: Ensure the audio file exists before trying to play.
@@ -427,32 +474,31 @@ def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
             audio_source = discord.FFmpegPCMAudio(file_path)
             voice_client.play(
                 audio_source,
-                after=lambda e: song_finished(file_path, ctx, voice_client, error=e) # Pass voice_client
+                after=lambda e: song_finished(file_path, guild_state, error=e) # Pass guild_state
             )
-            # Schedule the "Now playing" message to be sent in the event loop (ctx.send is async).
-            asyncio.run_coroutine_threadsafe(ctx.send(f"Now playing: '{song_title}'"), bot.loop)
+            asyncio.run_coroutine_threadsafe(ctx.send(f"Now playing: '{song_title}'"), guild_state.bot.loop)
 
-            # Reset or start the inactivity timer. This timer ensures the bot disconnects if idle.
-            if inactive_timer:
-                inactive_timer.cancel()
-            inactive_timer = bot.loop.call_later(inactive_time, check_inactive, voice_client, ctx)
-            logger.info(f"Inactivity timer reset/started for {inactive_time}s in guild '{ctx.guild.name}'.")
+            if guild_state.inactive_timer:
+                guild_state.inactive_timer.cancel()
+            # Pass guild_state to check_inactive
+            guild_state.inactive_timer = guild_state.bot.loop.call_later(inactive_time, check_inactive, guild_state)
+            logger.info(f"Inactivity timer reset/started for {inactive_time}s in guild '{ctx.guild.name}' (ID: {guild_state.guild_id}).")
 
         except Exception as e:
             # Catch-all for unexpected errors during playback setup.
             logger.error(f"Error trying to play {file_path} for song '{song_title}': {e}", exc_info=True)
             asyncio.run_coroutine_threadsafe(
-                ctx.send(f"An error occurred while trying to play '{song_title}'. Check logs for details."), bot.loop
+                ctx.send(f"An error occurred while trying to play '{song_title}'. Check logs for details."), guild_state.bot.loop
             )
-            cleanup(file_path) # Clean up the failed song file.
-            current_song = None # Reset current_song.
-            current_activity_name = "idle"
-            play_next_song(voice_client, ctx) # Attempt to play the next song.
+            cleanup(file_path)
+            guild_state.current_song_path = None
+            guild_state.current_song_title = None
+            play_next_song(guild_state) # Attempt to play the next song for this guild.
 
-    else:  # If the queue is empty
-        logger.info(f"Queue is empty for guild '{ctx.guild.name}'. No more songs to play.")
-        current_song = None
-        current_activity_name = "idle"
+    else:  # If the guild's queue is empty
+        logger.info(f"Queue is empty for guild '{ctx.guild.name}' (ID: {guild_state.guild_id}). No more songs to play.")
+        guild_state.current_song_path = None
+        guild_state.current_song_title = None
         # The inactivity timer is NOT reset here. If a song just finished and the queue is now empty,
         # the existing timer (started when that song began) will eventually call check_inactive.
         # If 'leave' was called, the timer is explicitly cancelled.
@@ -467,77 +513,78 @@ def song_finished(file_path: str, ctx: commands.Context, voice_client: discord.V
 
     Args:
         file_path (str): The path of the song that finished.
-        ctx (commands.Context): The original command context.
-        voice_client (discord.VoiceClient): The voice client instance.
-        error (Exception, optional): Any error that occurred during playback. Defaults to None.
-                                     Passed by the 'after' callback in voice_client.play().
+        guild_state (GuildPlayerState): The playback state for the guild.
+        error (Exception, optional): Any error that occurred during playback.
     """
+    ctx = guild_state.last_ctx # Get last context for this guild
+    voice_client = guild_state.voice_client
+
     if error:
-        # Log any errors that occurred during playback.
-        logger.error(f"Playback error for {file_path} in guild '{ctx.guild.name}': {error}")
-        # Optionally, send a message to the channel, but be mindful of spamming if errors are frequent.
-        # asyncio.run_coroutine_threadsafe(ctx.send(f"An error occurred with '{os.path.basename(file_path)}' during playback."), bot.loop)
+        logger.error(f"Playback error for {file_path} in guild {guild_state.guild_id}: {error}")
+        if ctx:
+            asyncio.run_coroutine_threadsafe(
+                ctx.send(f"An error occurred with '{os.path.basename(file_path)}' during playback."), guild_state.bot.loop
+            )
 
-    logger.info(f"Song finished: '{os.path.basename(file_path)}' in guild '{ctx.guild.name}'. Cleaning up file.")
-    cleanup(file_path)  # Delete the audio file.
+    logger.info(f"Song finished: '{os.path.basename(file_path)}' in guild {guild_state.guild_id}. Cleaning up file.")
+    cleanup(file_path)
+    guild_state.current_song_path = None # Mark no song is playing before calling play_next
+    guild_state.current_song_title = None
 
-    # Check if the bot is still connected to a voice channel before trying to play the next song.
+
     if voice_client and voice_client.is_connected():
-        play_next_song(voice_client, ctx)  # Proceed to play the next song.
+        play_next_song(guild_state)
     else:
-        logger.info(f"Song finished, but bot is no longer connected to voice in guild '{ctx.guild.name}'. Clearing queue.")
-        # If bot disconnected unexpectedly (e.g., kicked), clear queue and reset state.
-        queue.clear()
-        song_titles.clear()
-        global current_song, current_activity_name, inactive_timer
-        current_song = None
-        current_activity_name = "idle"
-        if inactive_timer:
-            inactive_timer.cancel()
-            inactive_timer = None
+        logger.info(f"Song finished (guild {guild_state.guild_id}), but bot is no longer connected. Clearing queue for this guild.")
+        guild_state.queue.clear()
+        guild_state.song_titles.clear()
+        # current_song_path already None
+        if guild_state.inactive_timer:
+            guild_state.inactive_timer.cancel()
+            guild_state.inactive_timer = None
 
 
-def check_inactive(voice_client: discord.VoiceClient, ctx: commands.Context):
+def check_inactive(guild_state: GuildPlayerState):
     """
-    Callback for the inactivity timer. Scheduled by `bot.loop.call_later`.
-    Checks if the bot is inactive (i.e., not playing anything and queue is empty)
-    and disconnects from the voice channel if it is.
+    Callback for the inactivity timer for a specific guild.
+    Checks if the bot is inactive in that guild and disconnects if so.
 
     Args:
-        voice_client (discord.VoiceClient): The voice client instance at the time the timer was set.
-        ctx (commands.Context): The original command context (used for sending messages and guild info).
+        guild_state (GuildPlayerState): The playback state for the guild.
     """
-    global current_song, inactive_timer, current_activity_name
+    ctx = guild_state.last_ctx # Get last context for this guild
+    voice_client = guild_state.voice_client
 
-    # Check if a song is supposed to be playing or is actively playing.
-    # voice_client.is_playing() is a more reliable check for active audio transmission.
-    if current_song or (voice_client and voice_client.is_playing()):
-        logger.info(f"Inactivity check for guild '{ctx.guild.name}': Bot is active (song playing or current_song is set). Timer will be reset by new song if any.")
-        return  # Bot is active, so do nothing. The timer would have been (or will be) reset by a new song.
+    if guild_state.current_song_path or (voice_client and voice_client.is_playing()):
+        logger.info(f"Inactivity check for guild {guild_state.guild_id}: Bot is active. Timer will be reset by new song if any.")
+        return
 
-    # If no song is set and nothing is playing, the bot is considered inactive.
-    logger.info(f"Inactivity check: Bot is inactive in '{voice_client.channel.name if voice_client else 'Unknown Channel'}' of guild '{ctx.guild.name}'.")
+    logger.info(f"Inactivity check: Bot is inactive in guild {guild_state.guild_id} ('{ctx.guild.name if ctx else 'Unknown Guild Name'}').")
     if voice_client and voice_client.is_connected():
-        logger.info(f"Disconnecting due to inactivity from '{voice_client.channel.name}' in guild '{ctx.guild.name}'.")
-        # Schedule disconnection and message sending on the bot's event loop.
-        asyncio.run_coroutine_threadsafe(voice_client.disconnect(), bot.loop)
-        asyncio.run_coroutine_threadsafe(ctx.send('Disconnected due to inactivity. The song queue has been cleared.'), bot.loop)
+        logger.info(f"Disconnecting due to inactivity from guild {guild_state.guild_id}.")
+        asyncio.run_coroutine_threadsafe(voice_client.disconnect(), guild_state.bot.loop)
+        guild_state.voice_client = None # Nullify voice client for this guild
 
-        # Fully clear queue and reset playback state.
-        queue.clear()
-        song_titles.clear()
-        current_song = None  # Ensure current_song is None.
-        current_activity_name = "idle"
-        if inactive_timer:  # Should be this timer instance, but good practice to check.
-            inactive_timer.cancel()
-            inactive_timer = None
-            logger.info(f"Inactivity timer cleared for guild '{ctx.guild.name}'.")
+        if ctx: # Only send message if we have a context
+            asyncio.run_coroutine_threadsafe(
+                ctx.send('Disconnected due to inactivity. The song queue has been cleared.'), guild_state.bot.loop
+            )
+        else: # No context to send message
+            logger.warning(f"No last_ctx available for guild {guild_state.guild_id} during inactivity disconnect message.")
+
+
+        guild_state.queue.clear()
+        guild_state.song_titles.clear()
+        # current_song_path is already None if we reached here
+        if guild_state.inactive_timer:
+            guild_state.inactive_timer.cancel()
+            guild_state.inactive_timer = None
+            logger.info(f"Inactivity timer cleared for guild {guild_state.guild_id}.")
     else:
-        logger.info(f"Inactivity check for guild '{ctx.guild.name}': Bot already disconnected or voice_client is invalid.")
-        # Ensure timer is cleaned up if it somehow runs when bot is already disconnected.
-        if inactive_timer:
-            inactive_timer.cancel()
-            inactive_timer = None
+        logger.info(f"Inactivity check for guild {guild_state.guild_id}: Bot already disconnected or voice_client is invalid.")
+        if guild_state.inactive_timer: # Ensure timer is cleaned up
+            guild_state.inactive_timer.cancel()
+            guild_state.inactive_timer = None
 
 
 # --- Bot Startup ---
