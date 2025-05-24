@@ -76,6 +76,6 @@ Contributions are welcome! If you'd like to contribute to this project, please f
 - Author: SpyFLow
 - Discord: [Discord](https://discord.com/users/533093302031876096)
 - GitHub: [https://github.com/spyflow](https://github.com/spyflow)
-- Email: [contact.spyflow@spyflow.net](mailto:contact.spyflow@spyflow.net)
+- Email: [contact.spyflow@spyflow.net](mailto:contact.spyflow@spyflow.link)
 
 Thank you for using the MusicBot! Enjoy listening to music in your Discord server!
