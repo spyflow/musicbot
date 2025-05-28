@@ -416,7 +416,7 @@ def cleanup(file_path: str):
         logger.error(f"Unexpected error in cleanup for file {file_path}: {e}", exc_info=True)
 
 
-def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
+def play_next_song(guild_state: GuildPlayerState):
     """
     Plays the next song in the queue.
     This is a synchronous function that's called when a song finishes (via 'after' callback)
@@ -424,7 +424,7 @@ def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
     It manages the global state for `current_song`, `current_activity_name`, and `inactive_timer`.
 
     Args:
-        guild_state (GuildPlayerState): The playback state object for the specific guild.
+        guild_state: GuildPlayerState: The playback state object for the specific guild.
     """
     # Removed global variable access, now uses guild_state attributes.
     voice_client = guild_state.voice_client # Get voice_client from guild_state
@@ -466,7 +466,7 @@ def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
                 cleanup(file_path) # Attempt to cleanup (e.g. if it was a broken symlink)
                 current_song = None # Reset current_song as it's unplayable
                 current_activity_name = "idle"
-                play_next_song(voice_client, ctx)  # Try to play the next song in the queue.
+                play_next_song(guild_state)  # Try to play the next song in the queue.
                 return
 
             # Play the audio. The 'after' parameter specifies a callback (song_finished)
@@ -506,7 +506,7 @@ def play_next_song(voice_client: discord.VoiceClient, ctx: commands.Context):
         # This ensures that check_inactive is the one to decide if the bot should leave.
 
 
-def song_finished(file_path: str, ctx: commands.Context, voice_client: discord.VoiceClient, error=None):
+def song_finished(file_path: str, guild_state: GuildPlayerState, error=None):
     """
     Callback function executed when a song finishes playing or is stopped (e.g., by `!skip`).
     It cleans up the audio file and triggers playing the next song if available.
