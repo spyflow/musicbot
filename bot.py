@@ -62,6 +62,22 @@ def get_or_create_guild_state(ctx: commands.Context) -> GuildPlayerState:
     guild_states[guild_id].bot = bot # Ensure bot instance is up-to-date (mostly for completeness)
     return guild_states[guild_id]
 
+# --- Song Metadata Class ---
+class SongMetadata:
+    """Represents metadata for a cached song."""
+    def __init__(self, video_id: str, title: str, file_path: str, size_bytes: int):
+        self.video_id: str = video_id
+        self.title: str = title
+        self.file_path: str = file_path
+        self.size_bytes: int = size_bytes
+        self.weight: int = 0  # Initialized to 0, will be set/incremented
+
+    def __repr__(self):
+        return (f"<SongMetadata video_id='{self.video_id}' "
+                f"title='{self.title[:20]}...' "
+                f"weight={self.weight} "
+                f"size={self.size_bytes}>")
+
 # --- YouTube Downloader Configuration ---
 # Options for the yt-dlp library, which handles downloading audio from YouTube.
 ydl_opts = {
@@ -104,10 +120,78 @@ if not DISCORD_BOT_TOKEN:
     logger.critical("CRITICAL: DISCORD_BOT_TOKEN not found in environment variables. The bot cannot connect to Discord.")
     sys.exit("Exiting: DISCORD_BOT_TOKEN not set. Please check your .env file or environment variables.")
 
-# Create music directory if it doesn't exist
-if not os.path.exists('music'):
-    os.makedirs('music')
-    logger.info("Created 'music' directory for storing downloaded songs.")
+# --- Global Cache Configuration ---
+MAX_CACHE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+current_cache_size_bytes = 0 # This will be properly initialized later
+global_song_metadata: dict[str, SongMetadata] = {}
+
+# Create music and global_cache directory if it doesn't exist
+base_music_dir = 'music'
+global_cache_dir_name = 'global_cache'
+global_cache_path = os.path.join(base_music_dir, global_cache_dir_name)
+
+if not os.path.exists(base_music_dir):
+    os.makedirs(base_music_dir)
+    logger.info(f"Created '{base_music_dir}' directory.")
+
+if not os.path.exists(global_cache_path):
+    os.makedirs(global_cache_path)
+    logger.info(f"Created '{global_cache_path}' directory for global music cache.")
+
+# --- Cache Initialization ---
+def initialize_cache_state():
+    """
+    Initializes the current_cache_size_bytes and potentially prunes global_song_metadata
+    based on files actually present in the global_cache_path.
+    This should be called once at bot startup.
+    """
+    global current_cache_size_bytes # Allow modification of global variable
+    
+    logger.info(f"Initializing cache state from directory: {global_cache_path}")
+    actual_files_in_cache = {} # video_id: file_path
+    
+    if not os.path.isdir(global_cache_path):
+        logger.warning(f"Global cache directory {global_cache_path} not found during initialization.")
+        current_cache_size_bytes = 0
+        return
+
+    for filename in os.listdir(global_cache_path):
+        file_path = os.path.join(global_cache_path, filename)
+        if os.path.isfile(file_path):
+            video_id_from_filename, ext = os.path.splitext(filename)
+            if ext == '.mp3': # Assuming all cached files are .mp3
+                actual_files_in_cache[video_id_from_filename] = file_path
+
+    total_size = 0
+    metadata_to_keep = {}
+
+    # Sync metadata with actual files
+    for video_id, metadata_entry in global_song_metadata.items():
+        if video_id in actual_files_in_cache:
+            # File exists, metadata is valid, ensure file path is correct
+            metadata_entry.file_path = actual_files_in_cache[video_id] # Update path just in case
+            try:
+                metadata_entry.size_bytes = os.path.getsize(metadata_entry.file_path) # Get actual current size
+                total_size += metadata_entry.size_bytes
+                metadata_to_keep[video_id] = metadata_entry
+                logger.debug(f"Cache init: Keeping metadata for '{metadata_entry.title}', size: {metadata_entry.size_bytes}")
+            except OSError as e:
+                logger.warning(f"Cache init: Error getting size for {metadata_entry.file_path} (ID: {video_id}): {e}. Excluding from cache count.")
+            del actual_files_in_cache[video_id] # Remove from dict as it's processed
+        else:
+            # Metadata exists but file doesn't (orphan metadata)
+            logger.warning(f"Cache init: Metadata for video ID '{video_id}' ('{metadata_entry.title}') exists, but file {metadata_entry.file_path} not found. Removing metadata.")
+
+    # Process files that exist but have no metadata (orphan files)
+    for video_id_orphan, file_path_orphan in actual_files_in_cache.items():
+        logger.warning(f"Cache init: Orphan file '{file_path_orphan}' (ID: {video_id_orphan}) found in cache directory without corresponding metadata. Consider deleting it manually or implement auto-deletion.")
+        # Optionally, could try to create metadata if info can be fetched, or delete the file.
+        # For now, just log. It won't be part of current_cache_size_bytes unless metadata is created.
+
+    global_song_metadata.clear()
+    global_song_metadata.update(metadata_to_keep)
+    current_cache_size_bytes = total_size
+    logger.info(f"Cache initialization complete. current_cache_size_bytes: {current_cache_size_bytes} bytes. Metadata entries: {len(global_song_metadata)}")
 
 
 # --- YouTube Search Function ---
@@ -275,14 +359,14 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
         await ctx.send(f"Could not find a video for: '{search_query}'. Please try a different search term or URL.")
         return
 
-    # Guild-specific download path setup
-    guild_id = str(ctx.guild.id)
-    guild_id = str(ctx.guild.id)
-    guild_music_dir = os.path.join('music', guild_id)
-    os.makedirs(guild_music_dir, exist_ok=True) # Ensure guild_music_dir is created early
+    # Use global cache path
+    # guild_id = str(ctx.guild.id) # No longer needed for path construction
+    # guild_music_dir = os.path.join('music', guild_id) # Old path
+    guild_music_dir = global_cache_path # New global cache path
+    # os.makedirs(guild_music_dir, exist_ok=True) # Already created at bot startup
 
     info_dict = None
-    file_path_to_play = None 
+    file_path_to_play = None
     title_to_play = None
 
     try:
@@ -306,81 +390,207 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
             logger.error(f"Could not determine video ID for {url_to_download} from pre-extraction.")
             await ctx.send("Error: Could not determine video ID before download.")
             return
-            
+
         title_to_play = pre_info_dict.get('title', 'Unknown Title')
         expected_ext = 'mp3' # Expected extension after postprocessing
-        potential_cached_path = os.path.join(guild_music_dir, f"{video_id}.{expected_ext}") 
+        # potential_cached_path now uses global_cache_path (via guild_music_dir assignment in the previous step)
+        potential_cached_path = os.path.join(guild_music_dir, f"{video_id}.{expected_ext}")
 
         # Step 2: Check cache
         if os.path.exists(potential_cached_path):
             logger.info(f"Cache hit: Using existing file {potential_cached_path} for video ID {video_id}")
             file_path_to_play = potential_cached_path
             info_dict = pre_info_dict # Use the info we already fetched
-            await ctx.send(f"Found '{title_to_play}' in cache. Adding to queue.")
-        else:
-            logger.info(f"Cache miss for video ID {video_id} ('{title_to_play}'). Proceeding with download.")
-            await ctx.send(f"Downloading audio for '{title_to_play}' ({url_to_download})... This may take a moment.")
+            await ctx.send(f"Found '{title_to_play}' in global cache. Adding to queue.")
+        else: # Song is not in cache, needs download
+            logger.info(f"Cache miss for video ID {video_id} ('{title_to_play}'). Proceeding with download to global cache.")
             
-            # Step 3: Download if not in cache
-            download_opts = ydl_opts.copy() 
-            download_opts['outtmpl'] = os.path.join(guild_music_dir, '%(id)s.%(ext)s')
-            # Ensure postprocessors are present for actual download and conversion
-            if 'postprocessors' not in download_opts: # Should be inherited from global ydl_opts
-                 download_opts['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
+            # --- Eviction Logic (Before Download) ---
+            global current_cache_size_bytes # Needed for modification
+            new_song_title_for_evict_log = pre_info_dict.get('title', 'Unknown Title') # For logging during eviction
+            new_song_size_bytes = pre_info_dict.get('filesize') or pre_info_dict.get('filesize_approx')
+
+            if not new_song_size_bytes:
+                logger.warning(f"Could not determine estimated size for new song '{new_song_title_for_evict_log}' (ID: {video_id}) before download. Eviction might not be accurate or skipped.")
+                # Fallback: use a default average size, or skip eviction if too risky.
+                # For now, if size is unknown, we might not evict enough.
+                # Consider assigning a default average if this happens often: new_song_size_bytes = 10 * 1024 * 1024 # 10MB example
+
+            if new_song_size_bytes: # Only proceed with eviction if song size estimate is available
+                while (current_cache_size_bytes + new_song_size_bytes > MAX_CACHE_SIZE_BYTES) and global_song_metadata:
+                    if not global_song_metadata: # Should be caught by the loop condition, but as safeguard
+                        logger.info("Cache is empty, cannot evict further.")
+                        break
+                    
+                    # Find song with the lowest weight to evict
+                    try:
+                        song_to_evict_id = min(global_song_metadata, key=lambda k: global_song_metadata[k].weight)
+                        song_to_evict = global_song_metadata[song_to_evict_id]
+                    except ValueError: # Handles empty global_song_metadata if it somehow happens
+                        logger.info("Tried to find song to evict in empty metadata. Stopping eviction.")
+                        break
+
+                    logger.info(f"Eviction needed. Attempting to evict song: '{song_to_evict.title}' (ID: {song_to_evict_id}, Weight: {song_to_evict.weight}, Size: {song_to_evict.size_bytes}) to make space for '{new_song_title_for_evict_log}'.")
+
+                    try:
+                        os.remove(song_to_evict.file_path)
+                        current_cache_size_bytes -= song_to_evict.size_bytes
+                        del global_song_metadata[song_to_evict_id]
+                        logger.info(f"Evicted '{song_to_evict.title}'. Cache size now: {current_cache_size_bytes}")
+                        if ctx: # Send message only if context is available
+                           asyncio.create_task(ctx.send(f"Cache full. Evicted '{song_to_evict.title}' (Weight: {song_to_evict.weight}) to make space."))
+                    except OSError as e:
+                        logger.error(f"Error evicting file {song_to_evict.file_path}: {e}. Stopping eviction process.")
+                        # If file removal fails, we should stop to avoid inconsistency.
+                        break 
+                    except KeyError:
+                        # This might happen if another process/task somehow removed the metadata already.
+                        logger.error(f"Tried to evict {song_to_evict_id} but it was already removed from metadata. Recalculating for next eviction candidate.")
+                        # No break here, try to find another song. Size was not decremented.
+                        continue # Recalculate next eviction candidate
+
+                    if not global_song_metadata: # Check again if cache became empty
+                        logger.info("Cache became empty during eviction process.")
+                        break
+            elif (current_cache_size_bytes > MAX_CACHE_SIZE_BYTES): # No new song size, but cache is already over limit
+                 logger.warning(f"Cache is over limit ({current_cache_size_bytes} > {MAX_CACHE_SIZE_BYTES}) but new song size is unknown. Cannot perform targeted eviction.")
+            # --- End of Eviction Logic ---
+
+            # Attempt to find a direct stream URL from pre_info_dict
+            stream_url = None
+            if pre_info_dict.get('url'): # Often a direct media URL or HLS/DASH manifest
+                stream_url = pre_info_dict['url']
+                logger.info(f"Found primary stream URL for '{title_to_play}': {stream_url}")
+            else: # Look for audio formats
+                for f in pre_info_dict.get('formats', []):
+                    if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('url'):
+                        stream_url = f['url']
+                        logger.info(f"Found audio stream format URL for '{title_to_play}': {stream_url}")
+                        break
             
-            with yt_dlp.YoutubeDL(download_opts) as ydl_downloader:
-                info_dict_download = ydl_downloader.extract_info(url_to_download, download=True)
+            if stream_url:
+                logger.info(f"Streaming '{title_to_play}' from URL while downloading in background.")
+                await ctx.send(f"Streaming '{title_to_play}' while downloading to cache...")
+                
+                # Add stream URL to queue for immediate playback
+                file_path_to_play = stream_url # Play from URL
 
-            # Path determination logic (from previous implementation)
-            song_title_download = info_dict_download.get('title', title_to_play) # Prefer download title
-            video_id_download = info_dict_download.get('id', video_id) # Prefer download ID
-            
-            expected_dl_path = os.path.join(guild_music_dir, f"{video_id_download}.mp3")
-            actual_final_path = None
+                # Create and schedule background download task
+                # The download_opts for the background task should be the full conversion ones
+                bg_download_opts = ydl_opts.copy()
+                bg_download_opts['outtmpl'] = os.path.join(global_cache_path, '%(id)s.%(ext)s')
+                # Ensure postprocessors for MP3 conversion
+                if 'postprocessors' not in bg_download_opts:
+                     bg_download_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
 
-            if 'requested_downloads' in info_dict_download and info_dict_download['requested_downloads']:
-                rd_info = info_dict_download['requested_downloads'][0]
-                if 'filepath' in rd_info and os.path.exists(rd_info['filepath']):
-                    actual_final_path = rd_info['filepath']
-                    logger.info(f"Using actual file path from info_dict_download['requested_downloads']: {actual_final_path}")
+                asyncio.create_task(download_song_to_cache_task(
+                    original_url=url_to_download, # The initial URL query (e.g. youtube watch URL)
+                    download_options=bg_download_opts,
+                    video_id_to_update=video_id, # video_id from pre_info_dict
+                    title_for_logs=title_to_play,
+                    expected_final_path_template=os.path.join(global_cache_path, f"{video_id}.mp3")
+                ))
+                # Note: Metadata for this song (video_id) will be initially minimal or absent
+                # until download_song_to_cache_task completes and updates it.
+                # Weight will be incremented when play_next_song is called with the stream_url.
 
-            if actual_final_path:
-                file_path_to_play = actual_final_path
-            elif os.path.exists(expected_dl_path):
-                file_path_to_play = expected_dl_path
-                logger.info(f"Using expected file path after download: {file_path_to_play}")
-            else:
-                original_ext = info_dict_download.get('ext')
-                original_file_path = os.path.join(guild_music_dir, f"{video_id_download}.{original_ext}")
-                if original_ext and original_ext != 'mp3' and os.path.exists(original_file_path):
-                    file_path_to_play = original_file_path
-                    logger.warning(f"MP3 not found at {expected_dl_path} after download. Using file with original extension: {file_path_to_play}")
+            else: # No suitable stream URL found, proceed with full download before playback
+                logger.info(f"No suitable stream URL found for '{title_to_play}'. Downloading fully before playback.")
+                await ctx.send(f"Downloading audio for '{title_to_play}' ({url_to_download})... This may take a moment.")
+                
+                # Standard download process (as it was before streaming attempt)
+                download_opts_full = ydl_opts.copy()
+                download_opts_full['outtmpl'] = os.path.join(guild_music_dir, '%(id)s.%(ext)s')
+                if 'postprocessors' not in download_opts_full:
+                     download_opts_full['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+
+                with yt_dlp.YoutubeDL(download_opts_full) as ydl_downloader:
+                    info_dict_download = ydl_downloader.extract_info(url_to_download, download=True)
+
+                song_title_download = info_dict_download.get('title', title_to_play)
+                video_id_download = info_dict_download.get('id', video_id)
+                expected_dl_path = os.path.join(guild_music_dir, f"{video_id_download}.mp3")
+                actual_final_path = None
+
+                if 'requested_downloads' in info_dict_download and info_dict_download['requested_downloads']:
+                    rd_info = info_dict_download['requested_downloads'][0]
+                    if 'filepath' in rd_info and os.path.exists(rd_info['filepath']):
+                        actual_final_path = rd_info['filepath']
+                
+                if actual_final_path:
+                    file_path_to_play = actual_final_path
+                elif os.path.exists(expected_dl_path):
+                    file_path_to_play = expected_dl_path
                 else:
-                    logger.error(f"Critical: Downloaded file for {video_id_download} not found at {expected_dl_path} or with original extension {original_file_path} after download.")
-                    await ctx.send(f"Error: Could not locate the downloaded file for '{song_title_download}' after download.")
-                    return
+                    original_ext = info_dict_download.get('ext')
+                    original_file_path = os.path.join(guild_music_dir, f"{video_id_download}.{original_ext}")
+                    if original_ext and original_ext != 'mp3' and os.path.exists(original_file_path):
+                        file_path_to_play = original_file_path
+                    else:
+                        logger.error(f"Critical: Downloaded file for {video_id_download} not found at {expected_dl_path} or {original_file_path}.")
+                        await ctx.send(f"Error: Could not locate file for '{song_title_download}' after download.")
+                        return
+                
+                info_dict = info_dict_download
+                title_to_play = song_title_download
+                logger.info(f"Full download complete for '{title_to_play}'. File: {file_path_to_play}")
 
-            if not file_path_to_play or not os.path.exists(file_path_to_play):
-                 logger.error(f"Failed to locate file after download for {video_id_download}")
-                 await ctx.send(f"Error: Could not locate file for '{song_title_download}' after download.")
-                 return
-            
-            info_dict = info_dict_download # Use the full info from download
-            title_to_play = song_title_download # Update title from download info
-
-            logger.info(f"Final file path after download set to: {file_path_to_play} for video ID {video_id_download}")
-            logger.info(f"Download complete for '{title_to_play}'. File saved to: {file_path_to_play}")
-
-        # Step 4: Common logic to add to queue
+        # Step 4: Common logic to add to queue (modified to handle stream URLs and downloaded files)
         if file_path_to_play and title_to_play:
-            logger.info(f"Adding to queue: '{title_to_play}' from {file_path_to_play}")
-            guild_state.queue.append(file_path_to_play)
+            video_id_of_song = video_id # From pre_info_dict, consistent ID
+
+            # If it's a stream URL, size is unknown until download completes.
+            # If it's a file path, we can get its size.
+            is_stream = file_path_to_play.startswith('http') 
+            song_size_bytes = 0
+
+            if not is_stream: # It's a local file (either from cache or full download)
+                try:
+                    if os.path.exists(file_path_to_play):
+                        song_size_bytes = os.path.getsize(file_path_to_play)
+                    else:
+                        logger.error(f"Local file {file_path_to_play} not found for metadata size.")
+                except OSError as e:
+                    logger.error(f"OS error getting size of local file {file_path_to_play}: {e}")
+            
+            # Metadata handling:
+            # If streaming, metadata entry might be temporary or updated later by download_song_to_cache_task.
+            # If from cache (already os.path.exists(potential_cached_path)), weight is incremented.
+            # If fully downloaded (not streaming path), new metadata is created.
+            if video_id_of_song in global_song_metadata:
+                global_song_metadata[video_id_of_song].weight += 1
+                # If it was streamed and now we have the file path from cache, ensure file_path is local
+                if not is_stream and global_song_metadata[video_id_of_song].file_path.startswith('http'):
+                     global_song_metadata[video_id_of_song].file_path = file_path_to_play
+                     global_song_metadata[video_id_of_song].size_bytes = song_size_bytes # Update size too
+                logger.info(f"Incremented weight for song '{title_to_play}' (ID: {video_id_of_song}) to {global_song_metadata[video_id_of_song].weight}.")
+            elif not is_stream: # New song, fully downloaded, not streaming
+                # This part handles songs that were fully downloaded without prior streaming attempt
+                current_cache_size_bytes += song_size_bytes # Add actual size
+                metadata = SongMetadata(
+                    video_id=video_id_of_song,
+                    title=title_to_play,
+                    file_path=file_path_to_play,
+                    size_bytes=song_size_bytes
+                )
+                metadata.weight = 1
+                global_song_metadata[video_id_of_song] = metadata
+                logger.info(f"Added new fully downloaded song '{title_to_play}' (ID: {video_id_of_song}) to metadata. Weight: 1, Size: {song_size_bytes}. Cache size: {current_cache_size_bytes}")
+            # If it IS a stream and not in metadata, download_song_to_cache_task will handle its metadata creation.
+            # We avoid adding a stream URL directly to metadata here, task will add the final file path.
+
+            logger.info(f"Adding to queue: '{title_to_play}' (source: {'STREAM' if is_stream else 'FILE'})")
+            guild_state.queue.append(file_path_to_play) # Can be stream URL or file path
             guild_state.song_titles.append(title_to_play)
-            await ctx.send(f"Added to queue: '{title_to_play}'") # Message now reflects cached or downloaded
+            await ctx.send(f"Added to queue: '{title_to_play}'")
             
             if not guild_state.current_song_path and guild_state.voice_client and guild_state.voice_client.is_connected():
                 play_next_song(guild_state)
@@ -459,21 +669,8 @@ async def leave(ctx: commands.Context):
         
         await ctx.send('Disconnected from voice channel and cleared the song queue for this server.')
 
-        # Delete guild-specific cache directory
-        guild_id_str = str(guild_state.guild_id) # Use guild_state.guild_id for consistency
-        guild_music_dir = os.path.join('music', guild_id_str)
-
-        if os.path.exists(guild_music_dir):
-            try:
-                shutil.rmtree(guild_music_dir)
-                logger.info(f"Successfully deleted cache directory for guild {guild_id_str}: {guild_music_dir}")
-                # Optionally inform user, but primary message is above.
-                # await ctx.send("Song cache for this server has been cleared.") 
-            except OSError as e:
-                logger.error(f"Error deleting cache directory {guild_music_dir} for guild {guild_id_str}: {e.strerror}")
-                # await ctx.send(f"Note: Could not fully clear the song cache for this server: {e.strerror}")
-        else:
-            logger.info(f"Cache directory {guild_music_dir} for guild {guild_id_str} not found. No deletion needed.")
+        # The cache is global, so it's not cleared when leaving a guild.
+        logger.info(f"Left voice channel in guild {guild_state.guild_id}. Global cache is not affected.")
 
         # Optionally, remove the state from the global dictionary:
         # if ctx.guild.id in guild_states:
@@ -514,55 +711,69 @@ async def author(ctx: commands.Context):
 @bot.command(name='clearcache', help='Clears all downloaded songs for this server. Usage: !clearcache')
 async def clearcache(ctx: commands.Context):
     """
-    Command to manually clear the song cache for the current guild.
-    Deletes the guild-specific music directory and all its contents.
+    Command to manually clear the **global song cache**.
+    Deletes all cached songs and resets cache metadata.
     """
-    guild_id_str = str(ctx.guild.id) # Use a distinct variable name
-    guild_music_dir = os.path.join('music', guild_id_str)
+    global current_cache_size_bytes # Allow modification
+    guild_state = get_or_create_guild_state(ctx)
 
-    guild_state = get_or_create_guild_state(ctx) # Get current guild state
-
-    # Check if a song from this guild's cache is currently playing
-    if guild_state.voice_client and guild_state.voice_client.is_playing() and \
-       guild_state.current_song_path and guild_state.current_song_path.startswith(guild_music_dir):
-        await ctx.send("A song from this server's cache is currently playing. "
-                       "Please stop playback (e.g., with `!leave` or by skipping all songs) before clearing the cache.")
+    if guild_state.voice_client and guild_state.voice_client.is_playing() and guild_state.current_song_path:
+        # Check if the currently playing song's path (which could be a URL) is from our cache metadata
+        # This is a bit tricky if current_song_path is a stream URL not yet in metadata.
+        # A simpler check is fine: if anything is playing, defer clearcache.
+        await ctx.send("A song is currently playing. "
+                       "Please stop playback (e.g., with `!leave` or by skipping all songs) before clearing the global cache.")
         return
 
-    if os.path.exists(guild_music_dir):
-        try:
-            shutil.rmtree(guild_music_dir)
-            logger.info(f"User {ctx.author.name} (ID: {ctx.author.id}) cleared cache for guild {guild_id_str} (Name: {ctx.guild.name}): {guild_music_dir}")
-            await ctx.send("Successfully cleared the song cache for this server. All downloaded songs for this server have been removed.")
-        except OSError as e:
-            logger.error(f"Error deleting cache directory {guild_music_dir} for guild {guild_id_str} on user command by {ctx.author.name}: {e.strerror}")
-            await ctx.send(f"Error: Could not clear the song cache. An OS error occurred: {e.strerror}")
-        except Exception as e:
-            logger.error(f"Unexpected error deleting cache directory {guild_music_dir} for guild {guild_id_str} by {ctx.author.name}: {e}", exc_info=True)
-            await ctx.send("An unexpected error occurred while trying to clear the cache.")
-    else:
-        logger.info(f"User {ctx.author.name} (ID: {ctx.author.id}) tried to clear cache for guild {guild_id_str} (Name: {ctx.guild.name}), but directory {guild_music_dir} was not found.")
-        await ctx.send("There are no cached songs for this server to clear.")
+    logger.info(f"User {ctx.author.name} (ID: {ctx.author.id}) initiated global cache clearing.")
+    files_deleted_count = 0
+    errors_deleting_count = 0
 
+    # Iterate over a copy for safe deletion from original dict
+    for video_id, metadata in list(global_song_metadata.items()): # Use list() for a copy
+        try:
+            if os.path.exists(metadata.file_path):
+                os.remove(metadata.file_path)
+                logger.info(f"Deleted from global cache: {metadata.file_path} (ID: {video_id})")
+                files_deleted_count += 1
+            else:
+                logger.warning(f"File {metadata.file_path} for ID {video_id} not found during clearcache, but metadata existed.")
+            # Remove metadata entry regardless of whether file existed, to ensure clean state
+            del global_song_metadata[video_id] 
+        except OSError as e:
+            logger.error(f"Error deleting file {metadata.file_path} from global cache: {e}")
+            errors_deleting_count += 1
+        except KeyError:
+            logger.error(f"KeyError trying to delete {video_id} from metadata during clearcache. Already removed?")
+
+
+    # Reset cache state
+    global_song_metadata.clear() # Should be mostly empty if all dels succeeded, but clear to be sure.
+    current_cache_size_bytes = 0
+
+    if errors_deleting_count > 0:
+        await ctx.send(f"Global song cache clearing finished. Successfully deleted {files_deleted_count} file(s). "
+                       f"Encountered errors deleting {errors_deleting_count} file(s). Check logs for details. "
+                       f"Cache size is now {current_cache_size_bytes} bytes.")
+    else:
+        await ctx.send(f"Successfully cleared the global song cache. Deleted {files_deleted_count} file(s). "
+                       f"Cache is now empty ({current_cache_size_bytes} bytes).")
 
 # --- Core Music Playback Logic & Utility Functions ---
 def cleanup(file_path: str):
     """
     Handles post-playback actions for an audio file.
-    Originally, this deleted the file. Now, it primarily logs or could be used for other non-destructive cleanup.
-
+    Files are retained in the global cache, so this function primarily logs.
     Args:
         file_path (str): The path to the audio file that was played.
     """
     try:
         if os.path.exists(file_path): # Check if the file actually exists
-            # os.remove(file_path) # File deletion disabled for caching
-            logger.info(f'Song finished, file retained in cache: {file_path}')
+            logger.info(f'Song finished, file retained in global cache: {file_path}')
         else:
-            logger.warning(f"Cleanup/post-playback: File path already non-existent: {file_path}")
+            logger.warning(f"Cleanup/post-playback: File path {file_path} already non-existent.")
     except OSError as e:
-        # Log detailed OS error if other operations fail (no deletion attempted).
-        logger.error(f"Error during cleanup operations for file {file_path} (no deletion attempted): {e.strerror} (Code: {e.errno})")
+        logger.error(f"Error during cleanup check for file {file_path} (no deletion attempted): {e.strerror} (Code: {e.errno})")
     except Exception as e:
         logger.error(f"Unexpected error in cleanup (no deletion attempted) for file {file_path}: {e}", exc_info=True)
 
@@ -608,24 +819,27 @@ def play_next_song(guild_state: GuildPlayerState):
         logger.info(f"Attempting to play (guild {guild_state.guild_id}): '{song_title}' from {file_path} in guild '{ctx.guild.name}'.")
 
         try:
-            # Crucial check: Ensure the audio file exists before trying to play.
-            if not os.path.exists(file_path):
-                logger.error(f"File not found for playback: {file_path}. Song: '{song_title}'. Skipping.")
+            # If file_path is a URL, os.path.exists will be false.
+            # FFmpegPCMAudio handles URLs, so we only need to check os.path.exists for local files.
+            is_url = file_path.startswith('http')
+            if not is_url and not os.path.exists(file_path):
+                logger.error(f"Local file not found for playback: {file_path}. Song: '{song_title}'. Skipping.")
                 asyncio.run_coroutine_threadsafe(
                     ctx.send(f"Error: Audio file for '{song_title}' not found. Skipping song."), bot.loop
                 )
-                # cleanup(file_path) # File path is non-existent, cleanup would warn.
-                                  # If it was a symlink, actual file might exist but we don't know its path.
-                                  # For now, simply log and try next song.
                 logger.warning(f"File {file_path} was not found for playback. It might have been deleted or was never properly created.")
-                guild_state.current_song_path = None # Ensure state is cleared
+                guild_state.current_song_path = None 
                 guild_state.current_song_title = None
-                play_next_song(guild_state)  # Try to play the next song in the queue.
+                play_next_song(guild_state)
                 return
 
-            # Play the audio. The 'after' parameter specifies a callback (song_finished)
-            # to be executed once playback completes or is stopped.
-            audio_source = discord.FFmpegPCMAudio(file_path)
+            # Play the audio (URL or local file path).
+            # Add FFmpeg options to handle potential issues with certain stream types or network conditions.
+            ffmpeg_options = {
+                'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                'options': '-vn'
+            }
+            audio_source = discord.FFmpegPCMAudio(file_path, **ffmpeg_options)
             voice_client.play(
                 audio_source,
                 after=lambda e: song_finished(file_path, guild_state, error=e) # Pass guild_state
@@ -741,9 +955,85 @@ def check_inactive(guild_state: GuildPlayerState):
             guild_state.inactive_timer = None
 
 
+async def download_song_to_cache_task(original_url: str, download_options: dict, video_id_to_update: str, title_for_logs: str, expected_final_path_template: str):
+    """
+    Downloads a song to the cache in the background.
+    Updates metadata and cache size upon completion.
+    """
+    global current_cache_size_bytes # Allow modification
+
+    logger.info(f"Background download started for '{title_for_logs}' (ID: {video_id_to_update}) from {original_url}")
+    download_success = False
+    final_file_path = None
+    actual_song_size = 0
+
+    try:
+        with yt_dlp.YoutubeDL(download_options) as ydl:
+            info_dict_download = ydl.extract_info(original_url, download=True)
+        
+        # Determine actual downloaded file path (similar to logic in play command)
+        # Note: ydl_opts['outtmpl'] in download_options should result in expected_final_path_template
+        # but we verify to be sure.
+        if os.path.exists(expected_final_path_template):
+            final_file_path = expected_final_path_template
+        else: # Fallback if extension was different or some other issue
+            downloaded_video_id = info_dict_download.get('id', video_id_to_update)
+            original_ext_dl = info_dict_download.get('ext')
+            temp_path = os.path.join(global_cache_path, f"{downloaded_video_id}.{original_ext_dl}")
+            if os.path.exists(temp_path) and original_ext_dl != 'mp3': # Check if it's the pre-conversion path
+                 logger.warning(f"Background download for '{title_for_logs}': MP3 may not be at expected path. Found {temp_path}. This might indicate an issue if conversion was expected.")
+                 # For now, we assume the postprocessor created the .mp3 at expected_final_path_template
+                 # If not, this part needs more robust handling of file paths from yt-dlp.
+
+        if os.path.exists(expected_final_path_template): # Re-check after considering alternatives
+            final_file_path = expected_final_path_template
+            actual_song_size = os.path.getsize(final_file_path)
+            download_success = True
+            logger.info(f"Background download complete for '{title_for_logs}'. File: {final_file_path}, Size: {actual_song_size}")
+        else:
+            logger.error(f"Background download for '{title_for_logs}': Final file {expected_final_path_template} not found after download attempt.")
+            
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"yt-dlp download error in background for '{title_for_logs}': {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error in background download task for '{title_for_logs}': {e}", exc_info=True)
+
+    if download_success and final_file_path:
+        # Update metadata
+        if video_id_to_update in global_song_metadata:
+            # Song was streamed, metadata might exist (e.g. from weight increment) but needs file_path and size
+            global_song_metadata[video_id_to_update].file_path = final_file_path
+            global_song_metadata[video_id_to_update].size_bytes = actual_song_size
+            # Weight was already incremented at streaming time if it was played.
+            # If it was added to queue but skipped before playing, weight might be 0 or from previous plays.
+            # If it's a new song, weight should be 1. This is tricky if it was never played from stream.
+            # For simplicity, if it's already in metadata, we assume its weight is being managed.
+            # If it was NOT in metadata (e.g. stream was added to queue but bot restarted before play), add it.
+            logger.info(f"Updated metadata for cached song '{title_for_logs}' (ID: {video_id_to_update}). Path: {final_file_path}, Size: {actual_song_size}")
+        else: # New song, first time seeing it (stream wasn't played or metadata was lost)
+            metadata = SongMetadata(
+                video_id=video_id_to_update,
+                title=title_for_logs,
+                file_path=final_file_path,
+                size_bytes=actual_song_size
+            )
+            metadata.weight = 1 # Initial weight for new cached song
+            global_song_metadata[video_id_to_update] = metadata
+            current_cache_size_bytes += actual_song_size # Add to cache size only if truly new
+            logger.info(f"Added new metadata for cached song '{title_for_logs}' (ID: {video_id_to_update}). Weight: 1, Size: {actual_song_size}. Cache now: {current_cache_size_bytes}")
+        
+        # Potentially, re-check eviction if the actual downloaded size is much larger than estimate
+        # This is complex, for now, eviction is done pre-download based on estimate.
+    elif not download_success:
+        logger.warning(f"Background download failed for '{title_for_logs}'. It will not be added to cache from this attempt.")
+        # If metadata was tentatively added for streaming, it should be cleaned up or marked as invalid path.
+        # Current logic: metadata is only fully added with file_path upon successful download.
+        # If streaming started and incremented weight on a non-existent metadata, that's a minor inconsistency.
+
 # --- Bot Startup ---
 # Standard Python practice: ensure the bot runs only when the script is executed directly.
 if __name__ == "__main__":
+    initialize_cache_state() # Initialize cache size and metadata from disk
     if not DISCORD_BOT_TOKEN:
         # Fallback if logger isn't fully set up or if .env is missing.
         print("FATAL ERROR: DISCORD_BOT_TOKEN environment variable not set. The bot cannot start.")
