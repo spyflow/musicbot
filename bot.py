@@ -9,7 +9,6 @@ import random
 import string
 import requests
 import dotenv
-import shutil
 
 # Code made by: spyflow
 # Discord: spyflow
@@ -71,13 +70,13 @@ ydl_opts = {
         'preferredcodec': 'mp3',  # Convert the audio to MP3 format.
         'preferredquality': '192',  # Set preferred audio quality to 192 kbps.
     }],
-    # 'outtmpl': 'music/%(id)s.%(ext)s', # Removed: To be set dynamically per guild.
+    'outtmpl': 'music/%(id)s.%(ext)s',  # Define output template: music/VIDEO_ID.mp3 (or other extension).
     'noplaylist': True,  # Disable downloading entire playlists if a playlist URL is given.
     'quiet': True, # Suppress yt-dlp console output unless there are errors.
     'default_search': 'ytsearch', # Use ytsearch for non-URL queries.
 }
 
-# ydl = yt_dlp.YoutubeDL(ydl_opts) # Removed: Instance will be created per download.
+ydl = yt_dlp.YoutubeDL(ydl_opts) # Create a yt-dlp instance with the specified options.
 
 # --- Logging Configuration ---
 # Standard Python logging setup.
@@ -275,122 +274,24 @@ async def play(ctx: commands.Context, *, search_query: str = ""): # Use * to con
         await ctx.send(f"Could not find a video for: '{search_query}'. Please try a different search term or URL.")
         return
 
-    # Guild-specific download path setup
-    guild_id = str(ctx.guild.id)
-    guild_id = str(ctx.guild.id)
-    guild_music_dir = os.path.join('music', guild_id)
-    os.makedirs(guild_music_dir, exist_ok=True) # Ensure guild_music_dir is created early
-
-    info_dict = None
-    file_path_to_play = None 
-    title_to_play = None
-
     try:
-        # Step 1: Extract info (no download)
-        info_ydl_opts = ydl_opts.copy()
-        info_ydl_opts['noplaylist'] = True
-        info_ydl_opts['quiet'] = True
-        info_ydl_opts.pop('postprocessors', None) # Avoid full processing for info extraction
+        await ctx.send(f"Downloading audio for '{url_to_download}'... This may take a moment.") # Download feedback
+        # Download audio using yt-dlp. This is a blocking I/O operation.
+        # For larger bots, consider running this in a separate thread using asyncio.to_thread (Python 3.9+)
+        # or a thread pool executor to avoid blocking the bot's main event loop.
+        info_dict = ydl.extract_info(url_to_download, download=True)
 
-        logger.info(f"Extracting video information for: {url_to_download}")
-        with yt_dlp.YoutubeDL(info_ydl_opts) as ydl_info_extractor:
-            try:
-                pre_info_dict = ydl_info_extractor.extract_info(url_to_download, download=False)
-            except Exception as e:
-                logger.error(f"Failed to extract initial video info for {url_to_download}: {e}")
-                await ctx.send(f"Error: Could not fetch initial information for the song. It might be an invalid link or network issue.")
-                return
-        
-        video_id = pre_info_dict.get('id')
-        if not video_id:
-            logger.error(f"Could not determine video ID for {url_to_download} from pre-extraction.")
-            await ctx.send("Error: Could not determine video ID before download.")
-            return
-            
-        title_to_play = pre_info_dict.get('title', 'Unknown Title')
-        expected_ext = 'mp3' # Expected extension after postprocessing
-        potential_cached_path = os.path.join(guild_music_dir, f"{video_id}.{expected_ext}") 
+        song_title = info_dict.get('title', 'Unknown Title')
+        video_id = info_dict.get('id', 'unknown_id') # Used for filename to avoid special characters.
+        # File path construction relies on 'outtmpl' in ydl_opts and 'preferredcodec'.
+        file_path = f"music/{video_id}.mp3"
 
-        # Step 2: Check cache
-        if os.path.exists(potential_cached_path):
-            logger.info(f"Cache hit: Using existing file {potential_cached_path} for video ID {video_id}")
-            file_path_to_play = potential_cached_path
-            info_dict = pre_info_dict # Use the info we already fetched
-            await ctx.send(f"Found '{title_to_play}' in cache. Adding to queue.")
-        else:
-            logger.info(f"Cache miss for video ID {video_id} ('{title_to_play}'). Proceeding with download.")
-            await ctx.send(f"Downloading audio for '{title_to_play}' ({url_to_download})... This may take a moment.")
-            
-            # Step 3: Download if not in cache
-            download_opts = ydl_opts.copy() 
-            download_opts['outtmpl'] = os.path.join(guild_music_dir, '%(id)s.%(ext)s')
-            # Ensure postprocessors are present for actual download and conversion
-            if 'postprocessors' not in download_opts: # Should be inherited from global ydl_opts
-                 download_opts['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
-            
-            with yt_dlp.YoutubeDL(download_opts) as ydl_downloader:
-                info_dict_download = ydl_downloader.extract_info(url_to_download, download=True)
+        logger.info(f"Download complete for '{song_title}'. File saved to: {file_path}")
 
-            # Path determination logic (from previous implementation)
-            song_title_download = info_dict_download.get('title', title_to_play) # Prefer download title
-            video_id_download = info_dict_download.get('id', video_id) # Prefer download ID
-            
-            expected_dl_path = os.path.join(guild_music_dir, f"{video_id_download}.mp3")
-            actual_final_path = None
-
-            if 'requested_downloads' in info_dict_download and info_dict_download['requested_downloads']:
-                rd_info = info_dict_download['requested_downloads'][0]
-                if 'filepath' in rd_info and os.path.exists(rd_info['filepath']):
-                    actual_final_path = rd_info['filepath']
-                    logger.info(f"Using actual file path from info_dict_download['requested_downloads']: {actual_final_path}")
-
-            if actual_final_path:
-                file_path_to_play = actual_final_path
-            elif os.path.exists(expected_dl_path):
-                file_path_to_play = expected_dl_path
-                logger.info(f"Using expected file path after download: {file_path_to_play}")
-            else:
-                original_ext = info_dict_download.get('ext')
-                original_file_path = os.path.join(guild_music_dir, f"{video_id_download}.{original_ext}")
-                if original_ext and original_ext != 'mp3' and os.path.exists(original_file_path):
-                    file_path_to_play = original_file_path
-                    logger.warning(f"MP3 not found at {expected_dl_path} after download. Using file with original extension: {file_path_to_play}")
-                else:
-                    logger.error(f"Critical: Downloaded file for {video_id_download} not found at {expected_dl_path} or with original extension {original_file_path} after download.")
-                    await ctx.send(f"Error: Could not locate the downloaded file for '{song_title_download}' after download.")
-                    return
-
-            if not file_path_to_play or not os.path.exists(file_path_to_play):
-                 logger.error(f"Failed to locate file after download for {video_id_download}")
-                 await ctx.send(f"Error: Could not locate file for '{song_title_download}' after download.")
-                 return
-            
-            info_dict = info_dict_download # Use the full info from download
-            title_to_play = song_title_download # Update title from download info
-
-            logger.info(f"Final file path after download set to: {file_path_to_play} for video ID {video_id_download}")
-            logger.info(f"Download complete for '{title_to_play}'. File saved to: {file_path_to_play}")
-
-        # Step 4: Common logic to add to queue
-        if file_path_to_play and title_to_play:
-            logger.info(f"Adding to queue: '{title_to_play}' from {file_path_to_play}")
-            guild_state.queue.append(file_path_to_play)
-            guild_state.song_titles.append(title_to_play)
-            await ctx.send(f"Added to queue: '{title_to_play}'") # Message now reflects cached or downloaded
-            
-            if not guild_state.current_song_path and guild_state.voice_client and guild_state.voice_client.is_connected():
-                play_next_song(guild_state)
-            elif not guild_state.voice_client or not guild_state.voice_client.is_connected(): # This condition might be redundant if play_next_song handles it
-                logger.warning("File added to queue, but voice client is not connected. Cannot start playback.")
-                await ctx.send("I'm not connected to a voice channel anymore. Please use !leave and !play again if needed.")
-        else:
-            # This case should ideally not be reached if video_id and title_to_play are always determined.
-            logger.error(f"file_path_to_play or title_to_play not set. Cannot add to queue. Video ID: {video_id if video_id else 'unknown'}")
-            await ctx.send("An error occurred: could not determine song details to add to queue.")
+        # Add the downloaded song to the queue.
+        guild_state.queue.append(file_path)
+        guild_state.song_titles.append(song_title)
+        await ctx.send(f"Added to queue: '{song_title}'")
 
         # If no song is currently playing and the bot is connected, start playback.
         if not guild_state.current_song_path and guild_state.voice_client and guild_state.voice_client.is_connected():
@@ -456,25 +357,7 @@ async def leave(ctx: commands.Context):
             guild_state.inactive_timer.cancel()
             guild_state.inactive_timer = None
             logger.info(f"Inactivity timer for guild {ctx.guild.id} cancelled due to 'leave' command.")
-        
         await ctx.send('Disconnected from voice channel and cleared the song queue for this server.')
-
-        # Delete guild-specific cache directory
-        guild_id_str = str(guild_state.guild_id) # Use guild_state.guild_id for consistency
-        guild_music_dir = os.path.join('music', guild_id_str)
-
-        if os.path.exists(guild_music_dir):
-            try:
-                shutil.rmtree(guild_music_dir)
-                logger.info(f"Successfully deleted cache directory for guild {guild_id_str}: {guild_music_dir}")
-                # Optionally inform user, but primary message is above.
-                # await ctx.send("Song cache for this server has been cleared.") 
-            except OSError as e:
-                logger.error(f"Error deleting cache directory {guild_music_dir} for guild {guild_id_str}: {e.strerror}")
-                # await ctx.send(f"Note: Could not fully clear the song cache for this server: {e.strerror}")
-        else:
-            logger.info(f"Cache directory {guild_music_dir} for guild {guild_id_str} not found. No deletion needed.")
-
         # Optionally, remove the state from the global dictionary:
         # if ctx.guild.id in guild_states:
         #     del guild_states[ctx.guild.id]
@@ -511,60 +394,26 @@ async def author(ctx: commands.Context):
     await ctx.send('This bot was made by spyflow (Discord: spyflow, GitHub: https://github.com/spyflow).')
 
 
-@bot.command(name='clearcache', help='Clears all downloaded songs for this server. Usage: !clearcache')
-async def clearcache(ctx: commands.Context):
-    """
-    Command to manually clear the song cache for the current guild.
-    Deletes the guild-specific music directory and all its contents.
-    """
-    guild_id_str = str(ctx.guild.id) # Use a distinct variable name
-    guild_music_dir = os.path.join('music', guild_id_str)
-
-    guild_state = get_or_create_guild_state(ctx) # Get current guild state
-
-    # Check if a song from this guild's cache is currently playing
-    if guild_state.voice_client and guild_state.voice_client.is_playing() and \
-       guild_state.current_song_path and guild_state.current_song_path.startswith(guild_music_dir):
-        await ctx.send("A song from this server's cache is currently playing. "
-                       "Please stop playback (e.g., with `!leave` or by skipping all songs) before clearing the cache.")
-        return
-
-    if os.path.exists(guild_music_dir):
-        try:
-            shutil.rmtree(guild_music_dir)
-            logger.info(f"User {ctx.author.name} (ID: {ctx.author.id}) cleared cache for guild {guild_id_str} (Name: {ctx.guild.name}): {guild_music_dir}")
-            await ctx.send("Successfully cleared the song cache for this server. All downloaded songs for this server have been removed.")
-        except OSError as e:
-            logger.error(f"Error deleting cache directory {guild_music_dir} for guild {guild_id_str} on user command by {ctx.author.name}: {e.strerror}")
-            await ctx.send(f"Error: Could not clear the song cache. An OS error occurred: {e.strerror}")
-        except Exception as e:
-            logger.error(f"Unexpected error deleting cache directory {guild_music_dir} for guild {guild_id_str} by {ctx.author.name}: {e}", exc_info=True)
-            await ctx.send("An unexpected error occurred while trying to clear the cache.")
-    else:
-        logger.info(f"User {ctx.author.name} (ID: {ctx.author.id}) tried to clear cache for guild {guild_id_str} (Name: {ctx.guild.name}), but directory {guild_music_dir} was not found.")
-        await ctx.send("There are no cached songs for this server to clear.")
-
-
 # --- Core Music Playback Logic & Utility Functions ---
 def cleanup(file_path: str):
     """
-    Handles post-playback actions for an audio file.
-    Originally, this deleted the file. Now, it primarily logs or could be used for other non-destructive cleanup.
+    Deletes the specified audio file from the local 'music/' directory.
+    This is called after a song has finished playing or if an error occurs during its processing.
 
     Args:
-        file_path (str): The path to the audio file that was played.
+        file_path (str): The path to the audio file to be deleted.
     """
     try:
-        if os.path.exists(file_path): # Check if the file actually exists
-            # os.remove(file_path) # File deletion disabled for caching
-            logger.info(f'Song finished, file retained in cache: {file_path}')
+        if os.path.exists(file_path):  # Check if the file actually exists before attempting deletion.
+            os.remove(file_path)
+            logger.info(f'Successfully deleted audio file: {file_path}')
         else:
-            logger.warning(f"Cleanup/post-playback: File path already non-existent: {file_path}")
+            logger.warning(f"Cleanup attempted for a non-existent file: {file_path}")
     except OSError as e:
-        # Log detailed OS error if other operations fail (no deletion attempted).
-        logger.error(f"Error during cleanup operations for file {file_path} (no deletion attempted): {e.strerror} (Code: {e.errno})")
+        # Log detailed OS error if deletion fails.
+        logger.error(f"Error deleting file {file_path}: {e.strerror} (Code: {e.errno})")
     except Exception as e:
-        logger.error(f"Unexpected error in cleanup (no deletion attempted) for file {file_path}: {e}", exc_info=True)
+        logger.error(f"Unexpected error in cleanup for file {file_path}: {e}", exc_info=True)
 
 
 def play_next_song(guild_state: GuildPlayerState):
@@ -614,12 +463,9 @@ def play_next_song(guild_state: GuildPlayerState):
                 asyncio.run_coroutine_threadsafe(
                     ctx.send(f"Error: Audio file for '{song_title}' not found. Skipping song."), bot.loop
                 )
-                # cleanup(file_path) # File path is non-existent, cleanup would warn.
-                                  # If it was a symlink, actual file might exist but we don't know its path.
-                                  # For now, simply log and try next song.
-                logger.warning(f"File {file_path} was not found for playback. It might have been deleted or was never properly created.")
-                guild_state.current_song_path = None # Ensure state is cleared
-                guild_state.current_song_title = None
+                cleanup(file_path) # Attempt to cleanup (e.g. if it was a broken symlink)
+                current_song = None # Reset current_song as it's unplayable
+                current_activity_name = "idle"
                 play_next_song(guild_state)  # Try to play the next song in the queue.
                 return
 
@@ -680,8 +526,8 @@ def song_finished(file_path: str, guild_state: GuildPlayerState, error=None):
                 ctx.send(f"An error occurred with '{os.path.basename(file_path)}' during playback."), guild_state.bot.loop
             )
 
-    logger.info(f"Song finished: '{os.path.basename(file_path)}' in guild {guild_state.guild_id}. Performing post-playback actions.")
-    cleanup(file_path) # cleanup now handles logging retention or other non-destructive actions
+    logger.info(f"Song finished: '{os.path.basename(file_path)}' in guild {guild_state.guild_id}. Cleaning up file.")
+    cleanup(file_path)
     guild_state.current_song_path = None # Mark no song is playing before calling play_next
     guild_state.current_song_title = None
 
