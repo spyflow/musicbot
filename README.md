@@ -71,6 +71,9 @@ Contributions are welcome! If you'd like to contribute to this project, please f
 3. Make your changes and test them thoroughly.
 4. Create a pull request with a clear description of your changes.
 
+## License
+This project is licensed under the CC BY-NC-SA 4.0 License - see the [LICENSE](LICENSE) file for details.
+
 ## Contact
 
 - Author: SpyFLow
